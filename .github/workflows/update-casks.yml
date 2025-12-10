@@ -1,0 +1,118 @@
+name: Autobump casks from livecheck
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+
+jobs:
+  autobump:
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout tap
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: homebrew-mytap
+
+      - name: Configure Git credentials
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@master
+
+      - name: Tap your repository
+        run: |
+          brew untap ifsin/mytap 2>/dev/null || true
+          brew tap ifsin/mytap "${{ github.workspace }}"
+
+      - name: Run livecheck and bump outdated casks
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAP_DIR="/opt/homebrew/Library/Taps/ifsin/homebrew-mytap"
+          
+          if [ ! -d "$TAP_DIR/Casks" ]; then
+            echo "No Casks directory found"
+            exit 0
+          fi
+          
+          changes_made=false
+          shopt -s nullglob  # Handle case when no .rb files exist
+          
+          for cask_file in "$TAP_DIR"/Casks/*.rb; do
+            if [ ! -f "$cask_file" ]; then
+              continue
+            fi
+            
+            cask=$(basename "$cask_file" .rb)
+            echo "::group::Checking $cask"
+            
+            # Run livecheck
+            livecheck_output=$(brew livecheck --cask "ifsin/mytap/$cask" --json || echo "")
+            
+            # Validate output
+            if [ -z "$livecheck_output" ]; then
+              echo "⚠️ Empty livecheck output for $cask"
+              echo "::endgroup::"
+              continue
+            fi
+            
+            # Parse versions
+            latest_version=$(echo "$livecheck_output" | jq -r '.[0].version.latest // empty' 2>/dev/null)
+            current_version=$(echo "$livecheck_output" | jq -r '.[0].version.current // empty' 2>/dev/null)
+            
+            # Check if update is available
+            if [ -n "$latest_version" ] && [ -n "$current_version" ] && [ "$latest_version" != "$current_version" ]; then
+              echo "✨ Found update: $cask $current_version → $latest_version"
+              
+              # Bump the cask
+              if brew bump-cask-pr "ifsin/mytap/$cask" \
+                   --version "$latest_version" \
+                   --no-browse \
+                   --write-only \
+                   --no-audit 2>&1; then
+                echo "✅ Successfully bumped $cask to $latest_version"
+
+                # Copy the modified file back to workspace
+                echo "Copying $cask_file"
+                cp "$cask_file" Casks/
+
+                changes_made=true
+              else
+                echo "⚠️ Failed to bump $cask"
+              fi
+            else
+              echo "✓ $cask is up to date"
+            fi
+            
+            echo "::endgroup::"
+          done
+          
+          # Commit and push if changes were made
+          if [ "$changes_made" = true ]; then
+            if git diff --quiet; then
+              echo "No file changes detected"
+            else
+              git add Casks/
+              git commit -m "chore: autobump casks from livecheck [skip ci]"
+              
+              # Push to current branch (handles main/master automatically)
+              branch=$(git branch --show-current)
+              git push origin "$branch"
+              echo "🚀 Pushed updates to $branch"
+            fi
+          else
+            echo "✅ No casks needed updating"
+          fi

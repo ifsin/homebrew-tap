@@ -1,6 +1,6 @@
 cask "dia-earlybird" do
   # version: app_version, build, uuid
-  version "1.15.0,73824,D5B696F0-E63E-475D-92F6-28176299CA06"
+  version "1.16.0,73929,D5B696F0-E63E-475D-92F6-28176299CA06"
   sha256 :no_check
 
   url "https://releases.diabrowser.com/release-candidate/" \
